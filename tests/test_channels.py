@@ -15,8 +15,11 @@ from datasets.channels import (
     CHANNEL_GROUP_SIZES,
     MODE_GROUPS,
     build_channels,
+    coordonly_channels,
     modality_effective_channels,
+    randproj_rgb_matrix,
     r_theta_channels,
+    xy_channels,
     ycbcr_from_rgb,
 )
 
@@ -211,6 +214,123 @@ def test_grayscale_drops_colour_via_augmentation_policy():
     image = _synthetic_rgb()
     out = policy.build_input_channels(image)
     assert out.shape[-1] == policy.effective_channel_count()
+
+
+# ---------------------------------------------------------------------------
+# T3: channel_build_order (C3 mechanism)
+# ---------------------------------------------------------------------------
+
+class _FixedRot90Transform:
+    """Deterministic stand-in for AugmentationPolicy's random geometric
+    Compose: always rotates 90° CCW. Used so T3's order tests are exact
+    rather than depending on Albumentations' random rotate-factor pick."""
+
+    def __call__(self, image, mask, **kwargs):
+        return {
+            "image": np.rot90(image, k=1, axes=(0, 1)).copy(),
+            "mask": np.rot90(mask, k=1, axes=(0, 1)).copy(),
+        }
+
+
+def test_order_post_regenerates_geometry():
+    # Under channel_build_order="post" (default), the X channel is
+    # regenerated from the *already-rotated* frame — it must equal the
+    # canonical X ramp for the output frame, not a rotated copy of the
+    # pre-rotation ramp.
+    cfg = _base_ds_cfg(channel_mode="m2")  # rgb + xy
+    policy = AugmentationPolicy(modality="colour", ds_cfg=cfg)
+    policy._geo_train_tf = _FixedRot90Transform()
+
+    image = (_synthetic_rgb() * 255).astype(np.uint8)
+    mask = _sharp_mask()
+    tensor, _ = policy.build_model_input(image, mask, train=True)
+
+    x_channel = tensor[3].numpy()  # offset 3: after the 3-channel rgb group
+    canonical_x = xy_channels(64, 64)[..., 0]
+    assert np.allclose(x_channel, canonical_x, atol=1e-5)
+
+
+def test_order_pre_corrupts_geometry():
+    # This is the paper's C3 mechanism, made explicit: under
+    # channel_build_order="pre", the X channel is built *before* the
+    # rotation and then dragged through the same geometric transform as
+    # RGB — so it ends up as a rotated copy of the pre-rotation ramp, not
+    # the canonical ramp for the output frame.
+    cfg = _base_ds_cfg(channel_mode="m2")
+    cfg["channel_build_order"] = "pre"
+    policy = AugmentationPolicy(modality="colour", ds_cfg=cfg)
+    policy._geo_train_tf = _FixedRot90Transform()
+
+    image = (_synthetic_rgb() * 255).astype(np.uint8)
+    mask = _sharp_mask()
+    tensor, _ = policy.build_model_input(image, mask, train=True)
+
+    x_channel = tensor[3].numpy()
+    canonical_x = xy_channels(64, 64)[..., 0]
+    assert not np.allclose(x_channel, canonical_x, atol=1e-5)
+
+    # It equals the *rotated* canonical ramp instead.
+    expected_rotated = np.rot90(canonical_x, k=1, axes=(0, 1))
+    assert np.allclose(x_channel, expected_rotated, atol=1e-5)
+
+
+def test_order_defaults_to_post():
+    cfg_no_key = _base_ds_cfg(channel_mode="m2")
+    cfg_explicit_post = _base_ds_cfg(channel_mode="m2")
+    cfg_explicit_post["channel_build_order"] = "post"
+
+    policy_default = AugmentationPolicy(modality="colour", ds_cfg=cfg_no_key)
+    policy_explicit = AugmentationPolicy(modality="colour", ds_cfg=cfg_explicit_post)
+    assert policy_default.channel_build_order == "post"
+    assert policy_default.channel_build_order == policy_explicit.channel_build_order
+
+
+# ---------------------------------------------------------------------------
+# T4: m6, m7, m8
+# ---------------------------------------------------------------------------
+
+def test_mode_channel_counts():
+    image = _synthetic_rgb()
+    assert build_channels(image, "m6").shape[-1] == 6
+    assert build_channels(image, "m7", dataset_name="ds").shape[-1] == 6
+    assert build_channels(image, "m8").shape[-1] == 5
+    # m3 (rgb+ycbcr) and m7 (rgb+randproj_rgb) must stay width-matched —
+    # m7 exists specifically as m3's same-width control.
+    assert build_channels(image, "m3").shape[-1] == build_channels(image, "m7", dataset_name="ds").shape[-1]
+
+
+def test_randproj_deterministic(tmp_path):
+    m1 = randproj_rgb_matrix("clinicdb", n=3, seed=0, cache_dir=str(tmp_path))
+    m2 = randproj_rgb_matrix("clinicdb", n=3, seed=0, cache_dir=str(tmp_path))
+    assert m1["matrix"] == m2["matrix"]
+    assert m1["hash"] == m2["hash"]
+    # A different dataset gets a different (still fixed) matrix.
+    m3 = randproj_rgb_matrix("busi", n=3, seed=0, cache_dir=str(tmp_path))
+    assert m3["matrix"] != m1["matrix"]
+
+
+def test_coordonly_has_no_pixel_dependence():
+    image_a = np.zeros((32, 32, 3), dtype=np.float32)
+    image_b = np.ones((32, 32, 3), dtype=np.float32)
+    out_a = build_channels(image_a, "m8")
+    out_b = build_channels(image_b, "m8")
+    assert np.array_equal(out_a, out_b)
+    assert np.array_equal(out_a, coordonly_channels(32, 32))
+
+
+def test_group_slices_cover_new_modes():
+    from attribution.common import resolve_group_slices
+
+    for mode in ("m6", "m7", "m8"):
+        ds_cfg = {"channel_mode": mode, "img_height": 64, "img_width": 64, "name": "ds"}
+        slices = resolve_group_slices(ds_cfg, "colour")
+        spans = sorted(slices.values(), key=lambda s: s.start)
+        # contiguous, non-overlapping, starting at 0
+        assert spans[0].start == 0
+        for a, b in zip(spans, spans[1:]):
+            assert a.stop == b.start
+        total = sum(CHANNEL_GROUP_SIZES[g] for g in MODE_GROUPS[mode])
+        assert spans[-1].stop == total
 
 
 def test_augmentation_policy_dataset_specific_intensity_scale():

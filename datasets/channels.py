@@ -12,15 +12,18 @@ Consolidates two previously-private, drifting implementations:
     constructs YCbCr channels (degenerate/constant for a repeated-gray
     source) in the first place, so no model needs its own inline patch.
 
-Five channel modes (m1..m5), built from named channel GROUPS so a
-consistent, predictable channel ordering is available for Phase 11's
-per-group Shapley attribution:
+Eight channel modes (m1..m8), built from named channel GROUPS so a
+consistent, predictable channel ordering is available for per-group
+Shapley/occlusion attribution:
 
     m1              rgb
     m2              rgb + xy
     m3              rgb + ycbcr
     m4              rgb + xy + rtheta
-    m5 (all)        rgb + xy + ycbcr + rtheta
+    m5              rgb + xy + ycbcr + rtheta
+    m6              rgb + rtheta                  (polar without Cartesian)
+    m7              rgb + randproj_rgb             (control for m3, same width)
+    m8              xy + rtheta                    (coordinate-only, no pixels)
 
 Every group-producing function here works on a numpy (H, W, C) frame — the
 same representation Albumentations produces before ToTensorV2() converts to
@@ -139,19 +142,81 @@ def randproj_channels(h: int, w: int, n: int = 2, seed: int = 0) -> np.ndarray:
 
 def coordonly_channels(h: int, w: int) -> np.ndarray:
     """(H, W, 5) xy_channels + r_theta_channels with **no RGB** — an
-    ablation control for the shortcut audit (Phase 13/S11): if a model
-    trained on position alone scores non-trivially, that's a red flag that
-    RGB-mode results might partly be exploiting frame position rather than
-    lesion appearance.
+    ablation control for the shortcut audit: if a model trained on
+    position alone scores non-trivially, that's a red flag that RGB-mode
+    results might partly be exploiting frame position rather than lesion
+    appearance. Equivalent to mode m8, routed through build_channels()
+    like every other mode rather than called directly.
     """
     return np.concatenate([xy_channels(h, w), r_theta_channels(h, w)], axis=-1)
+
+
+def _randproj_rgb_cache_key(dataset_name: str, n: int, seed: int) -> str:
+    payload = json.dumps({"dataset": dataset_name, "n": n, "seed": seed}, sort_keys=True)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def randproj_rgb_matrix(
+    dataset_name: str, n: int = 3, seed: int = 0, cache_dir: str = "artifacts/channel_stats"
+) -> Dict[str, object]:
+    """Fixed (dataset_name, seed)-keyed random 3xn linear projection matrix
+    for m7's RGB-value control — m3's (YCbCr) width-matched control: same
+    "fixed linear transform of RGB pixel values" shape, but a random
+    rather than a perceptually-motivated matrix, so an m3-vs-m1 gain that's
+    really just "three more numbers derived from RGB" rather than "YCbCr
+    specifically" shows up here too. Cached to disk so it's bit-identical
+    across every seed/fold of a run — a control that itself varied per
+    training seed wouldn't be a control (note: *seed* here is this
+    projection's own fixed seed, unrelated to a training run's seed).
+
+    Returns ``{"matrix": [[...]] (3xn), "hash": <16-hex-char sha1>}``.
+    """
+    key = _randproj_rgb_cache_key(dataset_name, n, seed)
+    path = os.path.join(cache_dir, f"randproj_rgb_{key}.json")
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+
+    # Derive a dataset-specific RNG seed from (dataset_name, seed) — using
+    # the bare int *seed* alone would give every dataset the identical
+    # matrix, defeating the point of it being *per-dataset*.
+    name_digest = int(hashlib.sha1(dataset_name.encode("utf-8")).hexdigest(), 16) % (2**32)
+    rng = np.random.default_rng([seed, name_digest])
+    matrix = rng.standard_normal((3, n)).astype(np.float32)
+    matrix_hash = hashlib.sha1(matrix.tobytes()).hexdigest()[:16]
+    result = {"matrix": matrix.tolist(), "hash": matrix_hash}
+
+    os.makedirs(cache_dir, exist_ok=True)
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(result, f, indent=2)
+    os.replace(tmp_path, path)
+    return result
+
+
+def randproj_rgb_channels(
+    image: np.ndarray,
+    dataset_name: str,
+    n: int = 3,
+    seed: int = 0,
+    cache_dir: str = "artifacts/channel_stats",
+) -> np.ndarray:
+    """(H, W, n) random-linear-projection-of-RGB-pixel-values control
+    channels for mode m7 — see randproj_rgb_matrix()'s docstring."""
+    proj = np.asarray(
+        randproj_rgb_matrix(dataset_name, n=n, seed=seed, cache_dir=cache_dir)["matrix"],
+        dtype=np.float32,
+    )
+    return image @ proj  # (H, W, 3) @ (3, n) -> (H, W, n)
 
 
 # ---------------------------------------------------------------------------
 # Channel-group registry and mode assembly
 # ---------------------------------------------------------------------------
 
-CHANNEL_GROUP_SIZES: Dict[str, int] = {"rgb": 3, "xy": 2, "ycbcr": 3, "rtheta": 3}
+CHANNEL_GROUP_SIZES: Dict[str, int] = {
+    "rgb": 3, "xy": 2, "ycbcr": 3, "rtheta": 3, "randproj_rgb": 3,
+}
 
 MODE_GROUPS: Dict[str, List[str]] = {
     "m1": ["rgb"],
@@ -159,10 +224,15 @@ MODE_GROUPS: Dict[str, List[str]] = {
     "m3": ["rgb", "ycbcr"],
     "m4": ["rgb", "xy", "rtheta"],
     "m5": ["rgb", "xy", "ycbcr", "rtheta"],
+    "m6": ["rgb", "rtheta"],                 # polar without Cartesian
+    "m7": ["rgb", "randproj_rgb"],            # control for m3 (same width)
+    "m8": ["xy", "rtheta"],                   # coordinate-only, no pixels
 }
 
 
-def _group_channels(name: str, image: np.ndarray) -> np.ndarray:
+def _group_channels(
+    name: str, image: np.ndarray, dataset_name: Optional[str] = None, randproj_seed: int = 0
+) -> np.ndarray:
     h, w = image.shape[:2]
     if name == "rgb":
         return image
@@ -173,36 +243,58 @@ def _group_channels(name: str, image: np.ndarray) -> np.ndarray:
         return np.concatenate([luma, chroma], axis=-1)
     if name == "rtheta":
         return r_theta_channels(h, w)
+    if name == "randproj_rgb":
+        if dataset_name is None:
+            raise ValueError("channel group 'randproj_rgb' requires dataset_name")
+        return randproj_rgb_channels(image, dataset_name, seed=randproj_seed)
     raise ValueError(f"Unknown channel group '{name}'. Known: {sorted(CHANNEL_GROUP_SIZES)}")
 
 
-def build_channels_from_groups(image: np.ndarray, groups: List[str]) -> np.ndarray:
+def build_channels_from_groups(
+    image: np.ndarray,
+    groups: List[str],
+    dataset_name: Optional[str] = None,
+    randproj_seed: int = 0,
+) -> np.ndarray:
     """Build a multi-channel input from an explicit, already-resolved group
     list — the primitive build_channels() (mode-name based) and
     datasets.augment.AugmentationPolicy (modality-filtered-group-list
     based) both reduce to. No mode-name lookup involved, so a caller
     holding an arbitrary/filtered group list (e.g. modality_effective_channels()'s
     output) never needs to find a mode name that happens to match it.
+
+    *dataset_name*/*randproj_seed* are only needed when "randproj_rgb" (m7)
+    is among *groups* — every other group ignores them.
     """
     unknown = set(groups) - set(CHANNEL_GROUP_SIZES)
     if unknown:
         raise ValueError(f"Unknown channel group(s) {sorted(unknown)}. Known: {sorted(CHANNEL_GROUP_SIZES)}")
-    return np.concatenate([_group_channels(g, image) for g in groups], axis=-1)
+    return np.concatenate(
+        [_group_channels(g, image, dataset_name, randproj_seed) for g in groups], axis=-1
+    )
 
 
-def build_channels(image: np.ndarray, mode: str, order: Optional[List[str]] = None) -> np.ndarray:
+def build_channels(
+    image: np.ndarray,
+    mode: str,
+    order: Optional[List[str]] = None,
+    dataset_name: Optional[str] = None,
+    randproj_seed: int = 0,
+) -> np.ndarray:
     """Build the full multi-channel input for *mode* from an (H, W, 3)
     float RGB frame in [0, 1].
 
     Args:
         image: (H, W, 3) float array in [0, 1] (post geometric-augmentation
             — see module docstring's ORDER=post note).
-        mode: one of MODE_GROUPS's keys ("m1".."m5").
+        mode: one of MODE_GROUPS's keys ("m1".."m8").
         order: optional explicit group ordering (must be a permutation of
             MODE_GROUPS[mode]) — the channel-group boundaries this produces
-            are what Phase 11's per-group Shapley attribution slices by, so
+            are what per-group Shapley/occlusion attribution slices by, so
             a caller that needs a specific, predictable layout can pin it
             here instead of relying on MODE_GROUPS' default order.
+        dataset_name/randproj_seed: only needed for mode m7 — see
+            build_channels_from_groups().
 
     Returns:
         (H, W, C) float array, channel groups concatenated in *order* (or
@@ -215,7 +307,7 @@ def build_channels(image: np.ndarray, mode: str, order: Optional[List[str]] = No
         raise ValueError(
             f"order {groups} is not a permutation of mode '{mode}''s groups {MODE_GROUPS[mode]}"
         )
-    return build_channels_from_groups(image, groups)
+    return build_channels_from_groups(image, groups, dataset_name, randproj_seed)
 
 
 def modality_effective_channels(mode: str, modality: str) -> List[str]:

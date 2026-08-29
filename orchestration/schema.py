@@ -134,8 +134,18 @@ class DatasetConfig(_Strict):
     # ultrasound-vs-microscopy augmentation-intensity split from
     # dataset.name, not from this field.
     modality: Literal["colour", "grayscale"] = "colour"
-    channel_mode: Literal["m1", "m2", "m3", "m4", "m5"] = "m1"
+    channel_mode: Literal["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8"] = "m1"
     channel_order: Optional[List[str]] = None
+
+    # C3 (augmentation order): whether datasets.augment.AugmentationPolicy
+    # regenerates geometry/random-projection channels from the
+    # already-augmented frame ("post", the default and only correct mode
+    # for a channel to mean what it claims) or builds them before
+    # geometric augmentation and lets that augmentation act on them too
+    # ("pre" — deliberately corrupts them, for the C3 ablation). Named
+    # distinctly from channel_order above (an unrelated field: an explicit
+    # group *ordering*, not a build-*timing* switch).
+    channel_build_order: Literal["post", "pre"] = "post"
 
     # ISIC18-specific (datasets/isic18.py): override the official
     # directory names when a download's layout doesn't match them exactly.

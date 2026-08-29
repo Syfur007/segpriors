@@ -211,6 +211,7 @@ def test_agreement_score_rejects_mismatched_groups():
 # ---------------------------------------------------------------------------
 
 def test_seg_grad_cam_shape_and_range():
+    torch.manual_seed(0)
     model = _mk_unet()
     model.eval()
     image = torch.rand(1, 3, H, W)
@@ -222,6 +223,7 @@ def test_seg_grad_cam_shape_and_range():
 
 
 def test_seg_xres_cam_shape_and_range():
+    torch.manual_seed(0)
     model = _mk_unet()
     model.eval()
     image = torch.rand(1, 3, H, W)
@@ -269,6 +271,7 @@ def test_parameter_randomization_sanity_check_passes_for_real_saliency():
     # directly: std ~3e-5 across the map), so it is a poor stand-in for
     # "real saliency" here; seg_grad_cam's gradient-based map (confirmed
     # non-degenerate above, full [0, 1] range) is used instead.
+    torch.manual_seed(0)
     model = _mk_unet()
     model.eval()
     forced_mask = torch.ones(1, 1, H, W)

@@ -4,8 +4,9 @@ Data module hierarchy for medical image segmentation.
 Classes
 -------
 BaseDataModule
-    Shared init: stride-snapping, transform wiring (via build_transforms),
-    seeded DataLoader factory.
+    Shared init: stride-snapping, transform wiring (via
+    datasets.augment.AugmentationPolicy — channel_mode/channel_build_order
+    aware), seeded DataLoader factory.
 
 StandardSplitDataModule(BaseDataModule)
     Uses pre-defined train/val/test splits from a registered dataset handler.
@@ -38,8 +39,8 @@ from loguru import logger
 from sklearn.model_selection import KFold
 from torch.utils.data import DataLoader
 
+from .augment import AugmentationPolicy, PolicyTransform
 from .dataset import MedicalSegmentationDataset
-from .transforms import build_transforms
 from .polyp.clinicdb import ClinicDB
 from .polyp.colondb import ColonDB
 from .busi import BUSI
@@ -182,7 +183,8 @@ class BaseDataModule:
     Responsibilities
     ----------------
     - Snap spatial dims to the model's stride (multiple-of-32 requirement).
-    - Build train/val transforms from ``ds_cfg`` via ``build_transforms``.
+    - Build a channel_mode/channel_build_order-aware train/val transform
+      pair via ``AugmentationPolicy``.
     - Provide a seeded ``_make_loader`` factory so every DataLoader gets
       reproducible worker seeds.
     """
@@ -210,7 +212,12 @@ class BaseDataModule:
         ds_cfg["img_width"]  = w
 
         # ── Transforms ───────────────────────────────────────────────────
-        self._train_tf, self._val_tf = build_transforms(h, w, ds_cfg)
+        # AugmentationPolicy is what actually connects dataset.channel_mode/
+        # channel_build_order to the data a model sees — a plain
+        # build_transforms() Compose only ever produces 3-channel RGB.
+        self._policy = AugmentationPolicy(modality=ds_cfg.get("modality", "colour"), ds_cfg=ds_cfg)
+        self._train_tf = PolicyTransform(self._policy, train=True)
+        self._val_tf = PolicyTransform(self._policy, train=False)
 
         # ── DataLoader shared kwargs ──────────────────────────────────────
         self._ldr_kw = dict(
