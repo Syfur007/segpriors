@@ -17,7 +17,7 @@ from stats import run_family_comparison
 from stats.correction import holm_bonferroni
 from stats.effectsize import cliffs_delta, paired_median_diff
 from stats.ranking import friedman_test, nemenyi_posthoc
-from stats.tests import bootstrap_ci, meaningfulness_gate, wilcoxon_paired_test
+from stats.tests import bootstrap_ci, meaningfulness_gate, tost_equivalence, wilcoxon_paired_test
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +78,50 @@ def test_bootstrap_ci_accepts_median_statistic():
 def test_bootstrap_ci_rejects_empty():
     with pytest.raises(ValueError):
         bootstrap_ci([])
+
+
+# ---------------------------------------------------------------------------
+# T5: tost_equivalence
+# ---------------------------------------------------------------------------
+
+def test_tost_equivalence_identical_distributions_are_equivalent():
+    rng = np.random.default_rng(0)
+    bound = 0.01
+    base = rng.normal(0.80, 0.05, 40)
+    a = base + rng.normal(0, 0.0005, 40)
+    b = base + rng.normal(0, 0.0005, 40)
+    result = tost_equivalence(a, b, bound)
+    assert result["verdict"] == "equivalent"
+    assert result["p_tost"] < 0.05
+    assert -bound < result["ci_low"] and result["ci_high"] < bound
+
+
+def test_tost_equivalence_large_separation_is_not_equivalent():
+    rng = np.random.default_rng(0)
+    bound = 0.01
+    a = rng.normal(0.80, 0.005, 30)
+    b = a - 5 * bound + rng.normal(0, 0.0005, 30)
+    result = tost_equivalence(a, b, bound)
+    assert result["verdict"] == "not_equivalent"
+
+
+def test_tost_equivalence_high_variance_small_n_is_inconclusive():
+    rng = np.random.default_rng(0)
+    bound = 0.01
+    a = rng.normal(0.80, 0.5, 4)
+    b = rng.normal(0.80, 0.5, 4)
+    result = tost_equivalence(a, b, bound)
+    assert result["verdict"] == "inconclusive"
+
+
+def test_tost_equivalence_rejects_length_mismatch():
+    with pytest.raises(ValueError):
+        tost_equivalence([1, 2, 3], [1, 2], bound=0.01)
+
+
+def test_tost_equivalence_rejects_unpaired():
+    with pytest.raises(NotImplementedError):
+        tost_equivalence([1, 2, 3], [1, 2, 3], bound=0.01, paired=False)
 
 
 @pytest.mark.parametrize(
@@ -318,6 +362,115 @@ def test_run_family_comparison_rejects_empty_comparators(paired_scores):
     proposed, _, _ = paired_scores
     with pytest.raises(ValueError):
         run_family_comparison("f", "p", proposed, {}, out_dir=None, ledger_dir=None)
+
+
+def test_run_family_comparison_equivalence_bound_propagates_verdict(tmp_path):
+    # A tight, non-significant difference well inside the bound -> the
+    # comparison's top-level verdict must be "equivalent_within_bound",
+    # and it must survive the round-trip through the written family JSON.
+    rng = np.random.default_rng(0)
+    bound = 0.01
+    base = rng.normal(0.80, 0.05, 40)
+    proposed = (base + rng.normal(0, 0.0005, 40)).tolist()
+    comparator = (base + rng.normal(0, 0.0005, 40)).tolist()
+
+    out_dir = tmp_path / "reports"
+    result = run_family_comparison(
+        family="equiv_family",
+        proposed_name="p",
+        proposed_per_image=proposed,
+        comparators={"c": comparator},
+        out_dir=str(out_dir),
+        ledger_dir=None,
+        equivalence_bound=bound,
+    )
+    comp = result["comparisons"][0]
+    assert comp["equivalence"]["verdict"] == "equivalent"
+    assert comp["verdict"] == "equivalent_within_bound"
+
+    with open(out_dir / "equiv_family.json") as f:
+        reloaded = json.load(f)
+    assert reloaded["comparisons"][0]["verdict"] == "equivalent_within_bound"
+
+
+def test_run_family_comparison_without_equivalence_bound_unchanged(paired_scores):
+    # equivalence_bound=None (the default) must leave the result shape
+    # exactly as it was before T5 — no "equivalence"/"verdict" keys.
+    proposed, unet, _ = paired_scores
+    result = run_family_comparison(
+        "f", "p", proposed, {"unet": unet}, out_dir=None, ledger_dir=None
+    )
+    comp = result["comparisons"][0]
+    assert "equivalence" not in comp
+    assert "verdict" not in comp
+    assert "equivalence_bound" not in result
+
+
+# ---------------------------------------------------------------------------
+# T6: seed-level statistics
+# ---------------------------------------------------------------------------
+
+def test_seed_level_summary_present(paired_scores):
+    proposed, unet, _ = paired_scores
+    proposed_seeds = [0.85, 0.86, 0.84]
+    unet_seeds = [0.80, 0.79, 0.81]
+    result = run_family_comparison(
+        "f", "p", proposed, {"unet": unet}, out_dir=None, ledger_dir=None,
+        proposed_per_seed=proposed_seeds, comparators_per_seed={"unet": unet_seeds},
+    )
+    assert "per_seed" in result
+    for name, seeds in [("p", proposed_seeds), ("unet", unet_seeds)]:
+        summary = result["per_seed"][name]
+        assert summary["seed_n"] == 3
+        assert summary["seed_mean"] == pytest.approx(np.mean(seeds))
+        assert summary["seed_std"] == pytest.approx(np.std(seeds))
+        assert "bootstrap_ci_over_seeds" in summary
+
+
+def test_seed_and_image_cis_differ_under_high_within_seed_correlation():
+    # Per-image scores drawn with strong within-seed correlation (a
+    # constant per-seed offset dominating small per-image noise) — the
+    # per-image CI (treats ~correlated scores as independent) is far
+    # tighter than the per-seed CI (3 genuinely independent seed means),
+    # which is exactly the "unit of analysis" distinction T6 exists for.
+    rng = np.random.default_rng(0)
+    seed_offsets = [0.70, 0.85, 0.90]  # 3 seeds, real spread between them
+    per_image = np.concatenate([
+        offset + rng.normal(0, 0.001, 50) for offset in seed_offsets
+    ]).tolist()
+    comparator = np.concatenate([
+        (offset - 0.02) + rng.normal(0, 0.001, 50) for offset in seed_offsets
+    ]).tolist()
+
+    result = run_family_comparison(
+        "f", "p", per_image, {"c": comparator}, out_dir=None, ledger_dir=None,
+        proposed_per_seed=seed_offsets,
+        comparators_per_seed={"c": [o - 0.02 for o in seed_offsets]},
+    )
+    image_ci = result["proposed_bootstrap_ci_over_images"]
+    seed_ci = result["per_seed"]["p"]["bootstrap_ci_over_seeds"]
+    image_width = image_ci["ci_high"] - image_ci["ci_low"]
+    seed_width = seed_ci["ci_high"] - seed_ci["ci_low"]
+    assert seed_width > image_width
+
+
+def test_run_family_comparison_rejects_seed_args_given_alone(paired_scores):
+    proposed, unet, _ = paired_scores
+    with pytest.raises(ValueError):
+        run_family_comparison(
+            "f", "p", proposed, {"unet": unet}, out_dir=None, ledger_dir=None,
+            proposed_per_seed=[0.8, 0.81, 0.79],
+        )
+
+
+def test_run_family_comparison_rejects_mismatched_seed_comparator_names(paired_scores):
+    proposed, unet, _ = paired_scores
+    with pytest.raises(ValueError):
+        run_family_comparison(
+            "f", "p", proposed, {"unet": unet}, out_dir=None, ledger_dir=None,
+            proposed_per_seed=[0.8, 0.81, 0.79],
+            comparators_per_seed={"not_unet": [0.7, 0.71, 0.69]},
+        )
 
 
 def test_run_family_comparison_skips_side_effects_when_dirs_none(paired_scores):

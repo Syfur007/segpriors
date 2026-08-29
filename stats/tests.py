@@ -76,6 +76,74 @@ def bootstrap_ci(
     }
 
 
+def tost_equivalence(
+    scores_a: Sequence[float], scores_b: Sequence[float], bound: float, paired: bool = True
+) -> Dict[str, object]:
+    """Two one-sided tests (TOST) for equivalence of paired samples —
+    C1/C2's null-result predictions need this: "no significant difference"
+    (a plain Wilcoxon p >= alpha) is not evidence of *equivalence*, only
+    absence of evidence. Delegates the actual two-one-sided-t-test
+    machinery to ``statsmodels.stats.weightstats.ttost_paired`` rather than
+    hand-rolling it (statsmodels is already a pinned dependency); the mean
+    difference and its CI reuse this module's own ``bootstrap_ci`` (over
+    the paired per-image differences), for the same reason
+    ``run_family_comparison`` already reuses it elsewhere.
+
+    Args:
+        bound: equivalence bound — the interval (-bound, +bound) the true
+            mean difference must lie within to call the two methods
+            equivalent.
+        paired: only True is currently implemented (every comparison this
+            module supports elsewhere is paired, same-image scores).
+
+    Returns:
+        ``{p_lower, p_upper, p_tost, mean_diff, ci_low, ci_high, verdict}``
+        — verdict is one of:
+          - "equivalent": p_tost < 0.05 AND the CI lies entirely within
+            (-bound, +bound).
+          - "not_equivalent": the CI lies entirely *outside* the bound on
+            one side — evidence the true difference exceeds it.
+          - "inconclusive": neither — the CI straddles a bound edge
+            (typically a high-variance/small-n, underpowered comparison).
+    """
+    from statsmodels.stats.weightstats import ttost_paired
+
+    if not paired:
+        raise NotImplementedError("tost_equivalence: only paired equivalence testing is implemented")
+
+    a = np.asarray(scores_a, dtype=float)
+    b = np.asarray(scores_b, dtype=float)
+    if len(a) != len(b):
+        raise ValueError(
+            f"tost_equivalence: scores_a and scores_b must be paired (same length), "
+            f"got {len(a)} vs {len(b)}"
+        )
+    if len(a) < 2:
+        raise ValueError("tost_equivalence: need at least 2 paired observations")
+
+    p_tost, (_, p_lower, _), (_, p_upper, _) = ttost_paired(a, b, -bound, bound)
+
+    ci = bootstrap_ci(a - b)
+    mean_diff, ci_low, ci_high = ci["point_estimate"], ci["ci_low"], ci["ci_high"]
+
+    if p_tost < 0.05 and ci_low > -bound and ci_high < bound:
+        verdict = "equivalent"
+    elif ci_low > bound or ci_high < -bound:
+        verdict = "not_equivalent"
+    else:
+        verdict = "inconclusive"
+
+    return {
+        "p_lower": float(p_lower),
+        "p_upper": float(p_upper),
+        "p_tost": float(p_tost),
+        "mean_diff": float(mean_diff),
+        "ci_low": float(ci_low),
+        "ci_high": float(ci_high),
+        "verdict": verdict,
+    }
+
+
 def meaningfulness_gate(
     observed_diff: float, min_meaningful_diff: float, p_value: float, alpha: float = 0.05
 ) -> str:

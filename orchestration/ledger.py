@@ -40,7 +40,7 @@ TEST_EVALS_FIELDS = [
 
 STATS_FIELDS = [
     "family", "comparison", "metric", "p_value", "corrected_p_value",
-    "effect_size", "n", "timestamp",
+    "effect_size", "n", "timestamp", "verdict",
 ]
 
 _TABLE_FIELDS = {
