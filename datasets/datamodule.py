@@ -278,10 +278,28 @@ class StandardSplitDataModule(BaseDataModule):
             self.handler = _GenericHandler(ds_cfg, self._seed, external=ds_cfg.get("external", False))
 
     def get_standard_loaders(self):
-        """Return ``(train_loader, val_loader)``."""
+        """Return ``(train_loader, val_loader)``.
+
+        Raises ``datasets.splits.ExternalDatasetError`` if
+        ``dataset.external: true`` — a registered handler (ClinicDB/
+        ColonDB/BUSI/ISIC18) doesn't take an `external` kwarg the way
+        `_GenericHandler` does, so this guard lives here instead, applying
+        the same "held-out evaluation-only" rule to every dataset source.
+        """
+        self._refuse_external_train_val()
         train_ds = self.handler.get_dataset("train", self._train_tf, **self._ds_kwargs)
         val_ds   = self.handler.get_dataset("val",   self._val_tf,   **self._ds_kwargs)
         return self._make_loader(train_ds, True), self._make_loader(val_ds, False)
+
+    def _refuse_external_train_val(self):
+        ds_cfg = self.config["dataset"]
+        if ds_cfg["name"].lower() in DATASETS and ds_cfg.get("external", False):
+            from datasets.splits import ExternalDatasetError
+            raise ExternalDatasetError(
+                f"Dataset '{ds_cfg['name']}' is marked external (dataset.external: "
+                f"true) — requesting a train/val loader for it is not allowed. "
+                "External datasets are held-out evaluation-only."
+            )
 
     def get_test_loader(self, token: str, ledger_dir: str = "artifacts/ledger"):
         """Return the test DataLoader, or ``None`` if no test samples exist.
@@ -382,7 +400,20 @@ class KFoldDataModule(BaseDataModule):
         return folds
 
     def get_fold_loaders(self, fold_idx: int):
-        """Return ``(train_loader, val_loader)`` for *fold_idx*."""
+        """Return ``(train_loader, val_loader)`` for *fold_idx*.
+
+        Raises ``datasets.splits.ExternalDatasetError`` if
+        ``dataset.external: true`` — see StandardSplitDataModule's
+        equivalent guard.
+        """
+        ds_cfg = self.config["dataset"]
+        if ds_cfg.get("external", False):
+            from datasets.splits import ExternalDatasetError
+            raise ExternalDatasetError(
+                f"Dataset '{ds_cfg['name']}' is marked external (dataset.external: "
+                f"true) — requesting a train/val loader for it is not allowed. "
+                "External datasets are held-out evaluation-only."
+            )
         folds = self._load_or_create_fold_splits()
         if not (0 <= fold_idx < len(folds)):
             raise ValueError(

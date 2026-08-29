@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 
@@ -208,6 +209,83 @@ def test_external_flows_through_standard_split_datamodule(tmp_path, tiny_dataset
     dm = StandardSplitDataModule(cfg)
     with pytest.raises(ExternalDatasetError):
         dm.get_standard_loaders()
+
+
+# ---------------------------------------------------------------------------
+# T8: external cohort support for a *registered* dataset handler
+# ---------------------------------------------------------------------------
+
+def _colondb_shaped_dir(root: Path):
+    """A minimal <root>/{train,val,test}/{images,masks} tree matching
+    datasets.polyp.colondb.ColonDB's expected layout."""
+    rng = np.random.default_rng(0)
+    for split in ("train", "val", "test"):
+        img_dir = root / split / "images"
+        mask_dir = root / split / "masks"
+        img_dir.mkdir(parents=True)
+        mask_dir.mkdir(parents=True)
+        img = rng.integers(0, 256, (64, 64, 3), dtype=np.uint8)
+        mask = np.zeros((64, 64), dtype=np.uint8)
+        cv2.imwrite(str(img_dir / "a.png"), img)
+        cv2.imwrite(str(mask_dir / "a.png"), mask)
+    return root
+
+
+def _external_colondb_config(tmp_path):
+    from orchestration.schema import validate_config
+
+    root = _colondb_shaped_dir(tmp_path / "colondb")
+    raw = {
+        "model": {"name": "unet", "in_channels": 3, "out_channels": 1, "features": [4, 8, 16, 32]},
+        "dataset": {
+            "name": "ColonDB", "root": str(root),
+            "img_height": 64, "img_width": 64, "batch_size": 2, "num_workers": 0,
+            "external": True,
+        },
+        "training": {"epochs": 1, "lr": 0.01, "loss_type": "dice", "device": "cpu", "seed": 42},
+        "k_fold": {"enabled": False},
+        "checkpoint": {"save_dir": str(tmp_path / "ckpt"), "resume": False},
+        "logging": {"log_dir": str(tmp_path / "logs"), "tb_dir": str(tmp_path / "runs"),
+                    "experiment_name": "ext_colondb"},
+    }
+    return validate_config(raw)
+
+
+def test_external_dataset_refuses_train_loader(tmp_path):
+    from datasets import StandardSplitDataModule
+
+    cfg = _external_colondb_config(tmp_path)
+    dm = StandardSplitDataModule(cfg)
+    with pytest.raises(ExternalDatasetError):
+        dm.get_standard_loaders()
+
+    # A *non*-external ColonDB config (external defaults to False) trains
+    # normally — marking one experiment's dataset.external true must not
+    # silently poison the registered ColonDB handler for every other
+    # config that composes the same dataset fragment (e.g.
+    # configs/experiment/mkunet/mkunet_s_colondb.yaml, a real training run).
+    cfg["dataset"]["external"] = False
+    dm2 = StandardSplitDataModule(cfg)
+    train_loader, val_loader = dm2.get_standard_loaders()
+    assert len(train_loader.dataset) > 0
+    assert len(val_loader.dataset) > 0
+
+
+def test_external_dataset_test_loader_still_guarded(tmp_path):
+    from datasets import StandardSplitDataModule
+    from orchestration.ledger import LedgerWriter
+
+    cfg = _external_colondb_config(tmp_path)
+    dm = StandardSplitDataModule(cfg)
+    ledger_dir = str(tmp_path / "ledger")
+
+    with pytest.raises(TestLoaderGuardError):
+        dm.get_test_loader("", ledger_dir=ledger_dir)
+
+    token = LedgerWriter(ledger_dir).issue_test_token(run_id="r1", config_hash="h1")
+    loader = dm.get_test_loader(token, ledger_dir=ledger_dir)
+    assert loader is not None
+    assert len(loader.dataset) > 0
 
 
 # ---------------------------------------------------------------------------
