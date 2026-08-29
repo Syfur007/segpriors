@@ -9,6 +9,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from analysis.centre_bias import centre_bias_index, constant_mask_floor, mask_density_map
 from analysis.cka import cka_matrix, flatten_spatial_features, linear_cka
 from analysis.erf import compute_erf, erf_radius
 from analysis.failure_taxonomy import FAILURE_CATEGORIES, classify_failure, failure_counts, gallery_indices
@@ -214,3 +215,52 @@ def test_gallery_indices_returns_matching_indices_capped():
 def test_gallery_indices_rejects_unknown_category():
     with pytest.raises(ValueError):
         gallery_indices(["success"], "not_a_real_category")
+
+
+# ---------------------------------------------------------------------------
+# T7: centre_bias.py
+# ---------------------------------------------------------------------------
+
+def _square_mask(size, cy, cx, half=6):
+    mask = np.zeros((size, size), dtype=np.uint8)
+    mask[cy - half : cy + half, cx - half : cx + half] = 1
+    return mask
+
+
+def test_centre_bias_index_high_floor_low_std_when_centred():
+    size = 64
+    masks = [_square_mask(size, size // 2, size // 2) for _ in range(20)]
+    result = centre_bias_index(masks, size=(size, size))
+    assert result["constant_floor_dice"] > 0.9
+    assert np.mean(result["centroid_std"]) < 0.05
+
+
+def test_centre_bias_index_low_floor_high_std_when_scattered():
+    size = 64
+    rng = np.random.default_rng(0)
+    margin = 12
+    masks = [
+        _square_mask(size, rng.integers(margin, size - margin), rng.integers(margin, size - margin))
+        for _ in range(20)
+    ]
+    result = centre_bias_index(masks, size=(size, size))
+    centred = centre_bias_index([_square_mask(size, size // 2, size // 2) for _ in range(20)], size=(size, size))
+    assert result["constant_floor_dice"] < centred["constant_floor_dice"]
+    assert np.mean(result["centroid_std"]) > np.mean(centred["centroid_std"])
+
+
+def test_mask_density_map_shape_and_range():
+    size = 32
+    masks = [_square_mask(64, 32, 32) for _ in range(3)]
+    density = mask_density_map(masks, size=(size, size))
+    assert density.shape == (size, size)
+    assert density.min() >= 0.0 and density.max() <= 1.0
+
+
+def test_constant_mask_floor_train_test_split():
+    size = 64
+    train_masks = [_square_mask(size, size // 2, size // 2) for _ in range(10)]
+    test_masks = [_square_mask(size, size // 2, size // 2) for _ in range(5)]
+    result = constant_mask_floor(train_masks, test_masks, size=(size, size))
+    assert set(result.keys()) == {"threshold", "train_dice", "test_dice"}
+    assert result["test_dice"] > 0.9
