@@ -3,8 +3,8 @@
 # https://download.pytorch.org/whl/cu113 instead (e.g.
 # `pip install torch==1.11.0+cu113 torchvision==0.12.0+cu113 --extra-index-url https://download.pytorch.org/whl/cu113`)
 # before running `pip install -r requirements.txt`.
-torch==1.11.0
-torchvision==0.12.0
+torch==1.11.0+cu113
+torchvision==0.12.0+cu113
 
 # Numeric stack pinned together (not just numpy) — these are the exact
 # versions this project is developed/tested against. scipy/scikit-learn/
