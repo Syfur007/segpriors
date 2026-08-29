@@ -17,6 +17,8 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
+from stats.tests import bootstrap_ci
+
 REQUIRED_SEEDS = 3  # spec §18: "Seeds | 3 minimum, identical across all models"
 _TRUE_STRINGS = {"true", "1", "yes"}
 
@@ -189,6 +191,221 @@ def render_main_comparison_table(
         r"\begin{tabular}{ll" + "c" * len(metrics) + "}",
         r"\toprule",
         "Model & Dataset & " + " & ".join(metrics) + r" \\",
+        r"\midrule",
+        *latex_rows,
+        r"\bottomrule",
+        r"\end{tabular}",
+    ])
+    return {"latex": latex, "csv": "\n".join(csv_lines)}
+
+
+def render_channel_mode_table(
+    results: List[Dict[str, Any]],
+    stats: Dict[str, Any],
+    profiling: List[Dict[str, Any]],
+    ledger_dir: str,
+    snapshot_id: str,
+) -> Dict[str, str]:
+    """F1's channel-mode grid (plan §2 T9) — one row per channel mode:
+    mode | effective channels | params(M) | GFLOPs | Dice mean+/-std
+    (seeds) | 95% CI | vs m1 (p_corr) | verdict.
+
+    Args:
+        results: one dict per (mode, dataset, seed) run, at minimum
+            ``{"mode", "dataset", "seed", "dice"}`` — pooled across
+            datasets/seeds for the mean/std/CI columns (ANALYSIS_PLAN.md's
+            primary endpoint: "pooled across the three training
+            datasets").
+        stats: ``stats.run_family_comparison()``'s return value for the F1
+            ``channel_modes`` family (``proposed`` == "m1", comparators
+            keyed by mode name) — supplies each non-m1 mode's
+            corrected p-value and verdict.
+        profiling: one dict per mode, ``{"mode", "effective_channels",
+            "params", "gflops"}``.
+    """
+    if not results:
+        raise ValueError("render_channel_mode_table: no results given")
+
+    runs = read_runs_ledger(ledger_dir)
+    check_no_dirty_tree_runs(runs)
+    check_minimum_seeds(runs)
+
+    proposed_name = stats.get("proposed", "m1")
+    comparisons = [f"{proposed_name}_vs_{c['comparator']}" for c in stats.get("comparisons", [])]
+    check_stats_entries_present(comparisons, read_stats_ledger(ledger_dir))
+
+    by_comparator = {c["comparator"]: c for c in stats.get("comparisons", [])}
+    profiling_by_mode = {p["mode"]: p for p in profiling}
+
+    import pandas as pd
+
+    df = pd.DataFrame(results)
+    footer = provenance_footer(snapshot_id)
+
+    columns = ["mode", "effective_channels", "params_M", "gflops", "dice_mean", "dice_std",
+               "ci_low", "ci_high", "vs_m1_p_corr", "verdict"]
+    csv_lines = [_footer_line_csv(footer), ",".join(columns)]
+    latex_rows = []
+    for mode in sorted(df["mode"].unique()):
+        dice_vals = df.loc[df["mode"] == mode, "dice"].to_numpy()
+        ci = bootstrap_ci(dice_vals)
+        prof = profiling_by_mode.get(mode, {})
+        comp = by_comparator.get(mode)
+        p_corr = f"{comp['corrected_p_value']:.4f}" if comp else "-"
+        verdict = comp.get("verdict", comp.get("meaningfulness_verdict", "-")) if comp else "-"
+
+        row = [
+            mode,
+            prof.get("effective_channels", ""),
+            f"{prof['params'] / 1e6:.2f}" if "params" in prof else "",
+            f"{prof['gflops']:.2f}" if "gflops" in prof else "",
+            f"{dice_vals.mean():.4f}",
+            f"{dice_vals.std():.4f}",
+            f"{ci['ci_low']:.4f}",
+            f"{ci['ci_high']:.4f}",
+            p_corr,
+            verdict,
+        ]
+        csv_lines.append(",".join(str(v) for v in row))
+        latex_rows.append(" & ".join(str(v) for v in row) + r" \\")
+
+    latex = "\n".join([
+        _footer_line_latex(footer),
+        r"\begin{tabular}{" + "l" * len(columns) + "}",
+        r"\toprule",
+        " & ".join(columns) + r" \\",
+        r"\midrule",
+        *latex_rows,
+        r"\bottomrule",
+        r"\end{tabular}",
+    ])
+    return {"latex": latex, "csv": "\n".join(csv_lines)}
+
+
+def render_capacity_control_table(
+    results: List[Dict[str, Any]],
+    stats: Dict[str, Any],
+    ledger_dir: str,
+    snapshot_id: str,
+) -> Dict[str, str]:
+    """F2's capacity-control comparison (plan §2 T9) — each non-RGB channel
+    mode paired with its width-matched RGB control: mode | matched control |
+    mode Dice mean+/-std | control Dice mean+/-std | delta | TOST verdict.
+
+    Args:
+        results: one dict per (mode, dataset, seed) run — must include rows
+            for both each mode in *stats*'s comparators and their
+            ``"<mode>_matched"`` control counterpart.
+        stats: ``stats.run_family_comparison()``'s return value for the F2
+            ``capacity_controls`` family, built with ``equivalence_bound``
+            set (so each comparison carries an ``"equivalence"`` TOST
+            result — see stats.tests.tost_equivalence).
+    """
+    if not results:
+        raise ValueError("render_capacity_control_table: no results given")
+
+    runs = read_runs_ledger(ledger_dir)
+    check_no_dirty_tree_runs(runs)
+    check_minimum_seeds(runs)
+
+    proposed_name = stats.get("proposed", "")
+    comparisons = [f"{proposed_name}_vs_{c['comparator']}" for c in stats.get("comparisons", [])]
+    check_stats_entries_present(comparisons, read_stats_ledger(ledger_dir))
+
+    import pandas as pd
+
+    df = pd.DataFrame(results)
+    footer = provenance_footer(snapshot_id)
+
+    columns = ["mode", "control", "mode_dice_mean", "control_dice_mean", "delta", "tost_verdict"]
+    csv_lines = [_footer_line_csv(footer), ",".join(columns)]
+    latex_rows = []
+    for comp in stats.get("comparisons", []):
+        mode = comp["comparator"]
+        control = f"{mode}_matched"
+        mode_dice = df.loc[df["mode"] == mode, "dice"].mean()
+        control_dice = df.loc[df["mode"] == control, "dice"].mean()
+        equivalence = comp.get("equivalence", {})
+        row = [
+            mode, control,
+            f"{mode_dice:.4f}", f"{control_dice:.4f}",
+            f"{mode_dice - control_dice:.4f}",
+            equivalence.get("verdict", "-"),
+        ]
+        csv_lines.append(",".join(str(v) for v in row))
+        latex_rows.append(" & ".join(str(v) for v in row) + r" \\")
+
+    latex = "\n".join([
+        _footer_line_latex(footer),
+        r"\begin{tabular}{" + "l" * len(columns) + "}",
+        r"\toprule",
+        " & ".join(columns) + r" \\",
+        r"\midrule",
+        *latex_rows,
+        r"\bottomrule",
+        r"\end{tabular}",
+    ])
+    return {"latex": latex, "csv": "\n".join(csv_lines)}
+
+
+def render_order_ablation_table(
+    results: List[Dict[str, Any]],
+    stats: Dict[str, Any],
+    ledger_dir: str,
+    snapshot_id: str,
+) -> Dict[str, str]:
+    """F3's order ablation (plan §2 T9) — m4/m5 channel_build_order=post vs.
+    pre, per dataset: mode | dataset | post Dice mean | pre Dice mean |
+    delta | p_corr | verdict.
+
+    Args:
+        results: one dict per (mode, order, dataset, seed) run, at minimum
+            ``{"mode", "order", "dataset", "seed", "dice"}`` — *order* is
+            ``"post"``/``"pre"``.
+        stats: ``stats.run_family_comparison()``'s return value for the F3
+            ``order_ablation`` family, comparators named e.g.
+            ``"m4-pre"``/``"m5-pre"`` (matching the plan's own
+            ``m4-post vs m4-pre`` naming).
+    """
+    if not results:
+        raise ValueError("render_order_ablation_table: no results given")
+
+    runs = read_runs_ledger(ledger_dir)
+    check_no_dirty_tree_runs(runs)
+    check_minimum_seeds(runs)
+
+    proposed_name = stats.get("proposed", "")
+    comparisons = [f"{proposed_name}_vs_{c['comparator']}" for c in stats.get("comparisons", [])]
+    check_stats_entries_present(comparisons, read_stats_ledger(ledger_dir))
+
+    by_comparator = {c["comparator"]: c for c in stats.get("comparisons", [])}
+
+    import pandas as pd
+
+    df = pd.DataFrame(results)
+    footer = provenance_footer(snapshot_id)
+
+    columns = ["mode", "dataset", "post_dice_mean", "pre_dice_mean", "delta", "p_corr", "verdict"]
+    csv_lines = [_footer_line_csv(footer), ",".join(columns)]
+    latex_rows = []
+    for mode in sorted(df["mode"].unique()):
+        for dataset in sorted(df.loc[df["mode"] == mode, "dataset"].unique()):
+            subset = df[(df["mode"] == mode) & (df["dataset"] == dataset)]
+            post_dice = subset.loc[subset["order"] == "post", "dice"].mean()
+            pre_dice = subset.loc[subset["order"] == "pre", "dice"].mean()
+            comp = by_comparator.get(f"{mode}-pre")
+            p_corr = f"{comp['corrected_p_value']:.4f}" if comp else "-"
+            verdict = comp.get("verdict", comp.get("meaningfulness_verdict", "-")) if comp else "-"
+            row = [mode, dataset, f"{post_dice:.4f}", f"{pre_dice:.4f}",
+                   f"{post_dice - pre_dice:.4f}", p_corr, verdict]
+            csv_lines.append(",".join(str(v) for v in row))
+            latex_rows.append(" & ".join(str(v) for v in row) + r" \\")
+
+    latex = "\n".join([
+        _footer_line_latex(footer),
+        r"\begin{tabular}{" + "l" * len(columns) + "}",
+        r"\toprule",
+        " & ".join(columns) + r" \\",
         r"\midrule",
         *latex_rows,
         r"\bottomrule",

@@ -10,7 +10,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence
 
-from .tables import provenance_footer
+from .tables import (
+    check_minimum_seeds,
+    check_no_dirty_tree_runs,
+    provenance_footer,
+    read_runs_ledger,
+)
 
 
 def _add_provenance_footer(fig, snapshot_id: str, git_commit: Optional[str] = None) -> None:
@@ -123,6 +128,166 @@ def _pareto_front_indices(rows: List[Dict[str, Any]], metric_key: str, cost_key:
         if not dominated:
             front.add(i)
     return front
+
+
+def render_shortcut_figure(
+    shortcut_json: List[Dict[str, Any]],
+    translation_json: Dict[str, Dict[str, List[Dict[str, Any]]]],
+    ledger_dir: str,
+    snapshot_id: str,
+):
+    """F4's shortcut audit (plan §2 T9) — two panels:
+      A: per-dataset coord-only-trained Dice vs. the constant-mask floor,
+         with ANALYSIS_PLAN.md's pre-registered shortcut threshold (0.300)
+         drawn as a reference line.
+      B: per-dataset degradation curves (Dice vs. translation-shift
+         magnitude), m1 vs m4.
+
+    Args:
+        shortcut_json: one dict per dataset: {"dataset", "coordonly_dice"
+            (robustness.geometric.shortcut_audit's output),
+            "constant_floor_dice" (analysis.centre_bias.
+            constant_mask_floor's test_dice), "threshold"}.
+        translation_json: ``{dataset: {"m1": curve, "m4": curve}}``, each
+            curve a ``robustness.common.degradation_curve``-shaped list of
+            ``{"severity", "mean_dice", "n"}`` dicts.
+    """
+    if not shortcut_json:
+        raise ValueError("render_shortcut_figure: no shortcut data given")
+
+    runs = read_runs_ledger(ledger_dir)
+    check_no_dirty_tree_runs(runs)
+    check_minimum_seeds(runs)
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(10, 4))
+
+    datasets = [row["dataset"] for row in shortcut_json]
+    x = list(range(len(datasets)))
+    ax_a.bar([i - 0.2 for i in x], [row["coordonly_dice"] for row in shortcut_json], width=0.4, label="coord-only (m8)")
+    ax_a.bar([i + 0.2 for i in x], [row["constant_floor_dice"] for row in shortcut_json], width=0.4, label="constant-mask floor")
+    threshold = shortcut_json[0].get("threshold")
+    if threshold is not None:
+        ax_a.axhline(threshold, color="red", linestyle="--", linewidth=1, label=f"threshold={threshold}")
+    ax_a.set_xticks(x)
+    ax_a.set_xticklabels(datasets, rotation=30, ha="right")
+    ax_a.set_ylabel("Dice")
+    ax_a.set_title("Coord-only vs. constant-mask floor")
+    ax_a.legend(fontsize=7)
+    ax_a.grid(True, alpha=0.3)
+
+    for dataset, curves in translation_json.items():
+        for mode, curve in curves.items():
+            severities = [row["severity"] for row in curve]
+            dices = [row["mean_dice"] for row in curve]
+            ax_b.plot(severities, dices, marker="o", label=f"{dataset}/{mode}")
+    ax_b.set_xlabel("Translation magnitude (severity)")
+    ax_b.set_ylabel("Dice")
+    ax_b.set_title("m1 vs m4 under translation shift")
+    ax_b.legend(fontsize=6)
+    ax_b.grid(True, alpha=0.3)
+
+    _add_provenance_footer(fig, snapshot_id)
+    fig.tight_layout()
+    return fig
+
+
+def render_centre_bias_scatter(
+    centre_bias_json: Dict[str, Dict[str, Any]],
+    results: List[Dict[str, Any]],
+    ledger_dir: str,
+    snapshot_id: str,
+):
+    """C4/dataset-selection framing — one point per dataset: x =
+    analysis.centre_bias.centre_bias_index's constant_floor_dice, y = mean
+    Dice gain of m4 over m1 for that dataset (does the channel gain
+    correlate with positional predictability).
+
+    Args:
+        centre_bias_json: ``{dataset: analysis.centre_bias.
+            centre_bias_index()output}``.
+        results: one dict per (mode, dataset, seed) run, at minimum
+            ``{"mode", "dataset", "seed", "dice"}`` — must include both
+            "m1" and "m4" rows for every dataset in *centre_bias_json*.
+    """
+    if not centre_bias_json:
+        raise ValueError("render_centre_bias_scatter: no centre-bias data given")
+
+    runs = read_runs_ledger(ledger_dir)
+    check_no_dirty_tree_runs(runs)
+    check_minimum_seeds(runs)
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import pandas as pd
+
+    df = pd.DataFrame(results)
+    fig, ax = plt.subplots(figsize=(5, 4))
+    for dataset, cb in centre_bias_json.items():
+        m1_dice = df.loc[(df["dataset"] == dataset) & (df["mode"] == "m1"), "dice"].mean()
+        m4_dice = df.loc[(df["dataset"] == dataset) & (df["mode"] == "m4"), "dice"].mean()
+        gain = m4_dice - m1_dice
+        ax.scatter(cb["constant_floor_dice"], gain, color="tab:blue")
+        ax.annotate(dataset, (cb["constant_floor_dice"], gain), fontsize=7, xytext=(3, 3), textcoords="offset points")
+
+    ax.set_xlabel("Centre-bias index (constant-mask floor Dice)")
+    ax.set_ylabel("m4 - m1 Dice gain")
+    ax.set_title("Positional predictability vs. channel gain")
+    ax.grid(True, alpha=0.3)
+    _add_provenance_footer(fig, snapshot_id)
+    fig.tight_layout()
+    return fig
+
+
+def render_occlusion_figure(
+    occlusion_json: Dict[str, Dict[str, float]],
+    shapley_json: Dict[str, Dict[str, float]],
+    ledger_dir: str,
+    snapshot_id: str,
+):
+    """Grouped bars: per-channel-group Dice drop (occlusion) and Shapley
+    mass, per dataset.
+
+    Args:
+        occlusion_json: ``{dataset: {group_name: dice_drop}}`` —
+            attribution.occlusion.run_channel_group_occlusion-shaped.
+        shapley_json: ``{dataset: {group_name: shapley_value}}`` —
+            attribution.shapley-shaped, same group keys per dataset.
+    """
+    if not occlusion_json:
+        raise ValueError("render_occlusion_figure: no occlusion data given")
+
+    runs = read_runs_ledger(ledger_dir)
+    check_no_dirty_tree_runs(runs)
+    check_minimum_seeds(runs)
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    datasets = sorted(occlusion_json)
+    fig, axes = plt.subplots(1, len(datasets), figsize=(4 * len(datasets), 4), squeeze=False)
+    for i, dataset in enumerate(datasets):
+        ax = axes[0][i]
+        groups = sorted(occlusion_json[dataset])
+        occ_vals = [occlusion_json[dataset][g] for g in groups]
+        shap_vals = [shapley_json.get(dataset, {}).get(g, 0.0) for g in groups]
+        x = np.arange(len(groups))
+        ax.bar(x - 0.2, occ_vals, width=0.4, label="occlusion Dice drop")
+        ax.bar(x + 0.2, shap_vals, width=0.4, label="Shapley mass")
+        ax.set_xticks(x)
+        ax.set_xticklabels(groups, rotation=30, ha="right")
+        ax.set_title(dataset)
+        if i == 0:
+            ax.legend(fontsize=7)
+    _add_provenance_footer(fig, snapshot_id)
+    fig.tight_layout()
+    return fig
 
 
 def render_critical_difference_figure(nemenyi_result: Dict[str, Any], snapshot_id: str):

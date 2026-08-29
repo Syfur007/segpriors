@@ -15,19 +15,26 @@ class ArtefactEntry(NamedTuple):
     source_artefact: str  # path relative to the reports/ root
 
 
-# Populated by the channel-representation study's reporting renderers
-# (see reporting/tables.py, reporting/figures.py). Every source_artefact
-# here is relative to the reports/ root.
-ARTEFACT_INVENTORY: List[ArtefactEntry] = []
+# The channel-representation study's manuscript artefacts, mapped to the
+# reporting/tables.py + reporting/figures.py renderer that produces each
+# (T9). Every source_artefact here is relative to the reports/ root.
+ARTEFACT_INVENTORY: List[ArtefactEntry] = [
+    ArtefactEntry("Table: channel-mode grid (F1)", "T9", "tables/channel_modes.csv"),
+    ArtefactEntry("Table: capacity control (F2)", "T9", "tables/capacity_control.csv"),
+    ArtefactEntry("Table: order ablation (F3)", "T9", "tables/order_ablation.csv"),
+    ArtefactEntry("Fig: shortcut audit (F4)", "T9", "figures/shortcut.pdf"),
+    ArtefactEntry("Fig: centre-bias scatter (C4)", "T9", "figures/centre_bias_scatter.pdf"),
+    ArtefactEntry("Fig: channel-group occlusion + Shapley", "T9", "figures/occlusion.pdf"),
+]
 
 
 def audit_artefact_inventory(reports_root: str) -> Dict[str, object]:
     """Checks which of ``ARTEFACT_INVENTORY``'s source artefacts actually
     exist on disk under *reports_root* — a run-time completeness check
     (which manuscript items are producible *right now*), not a test of the
-    mapping's correctness (that's a fixed table, verified by matching spec
-    §20 directly, the same way ``tests/test_ci_audit.py`` verifies spec
-    §19's test list).
+    mapping's correctness (that's a fixed table, verified by hand against
+    the manuscript's actual table/figure list, the same way
+    ``tests/test_ci_audit.py`` verifies its own frozen test list).
 
     Entries with ``produced_by == "manual"`` (Fig. 1, hand-drawn) or an
     empty/glob-containing source path are reported as ``skipped`` — glob
