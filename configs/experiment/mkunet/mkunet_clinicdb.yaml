@@ -1,0 +1,12 @@
+# MK-UNet (base size) on ClinicDB — composes the shared base config, the
+# ClinicDB dataset identity, and the base model-size fragment; only
+# per-experiment overrides (batch size, run name) are listed here. See
+# ../../base.yaml for every inherited default (early stopping, EMA,
+# augmentation, checkpointing).
+compose: ["../../base.yaml", "../../dataset/clinicdb.yaml", "../../model/mkunet/base.yaml"]
+
+dataset:
+  batch_size: 16
+
+logging:
+  experiment_name: "mkunet_clinicdb"

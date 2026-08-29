@@ -1,0 +1,20 @@
+# EMCAD on ClinicDB — composes the shared base config, the ClinicDB dataset
+# identity, and the EMCAD training recipe (norm-based grad clipping, combo
+# loss). See ../base.yaml for every other inherited default (early stopping,
+# EMA, augmentation, checkpointing).
+compose: ["../base.yaml", "../dataset/clinicdb.yaml", "../training/emcad.yaml"]
+
+model:
+  name: "emcad"
+  kernel_sizes: [1, 3, 5]       # MKDC kernel sizes
+  expansion_factor: 2
+  dw_parallel: True
+  add: True
+  lgag_ks: 3
+  activation: 'relu'
+  encoder: 'pvt_v2_b2'
+  pretrain: True
+  pretrained_dir: './pretrained_pth/pvt/'
+
+logging:
+  experiment_name: "emcad_clinicdb"

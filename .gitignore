@@ -1,0 +1,17 @@
+.vscode/
+/data
+/checkpoints
+/logs
+/search_test_results
+/env/*
+!/env/environment.lock
+/runs
+/pretrained_pth
+/artifacts
+__pycache__/
+*.pyc
+/dashboard
+/exp_dashboard
+exp_dashboard.zip
+.gitignore
+image.py
