@@ -21,7 +21,7 @@ jobs:
       - name: Install torch/torchvision (CPU)
         run: |
           pip install --index-url https://download.pytorch.org/whl/cpu \
-            torch==1.11.0 torchvision==0.14.1
+            torch==1.11.0 torchvision==0.12.1
 
       - name: Install the rest of requirements.txt
         run: |

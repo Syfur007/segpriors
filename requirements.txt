@@ -1,12 +1,12 @@
 # PyTorch: pinned to match the versions this project is developed/tested against.
 # The plain PyPI wheels below are CPU-only; for a CUDA build, install from
 # https://download.pytorch.org/whl/cu113 instead (e.g.
-# `pip install torch==1.11.0+cu113 torchvision==0.14.1+cu113 --extra-index-url https://download.pytorch.org/whl/cu113`
+# `pip install torch==1.11.0+cu113 torchvision==0.12.1+cu113 --extra-index-url https://download.pytorch.org/whl/cu113`
 # `pip install mmcv-full -f https://download.openmmlab.com/mmcv/dist/cu113/torch1.11.0/index.html`)
 # before running `pip install -r requirements.txt`. (cu116 wheels also exist for torch 1.11.0
 # if your driver predates CUDA 11.7 — check `nvidia-smi` before picking one.)
 torch==1.11.0
-torchvision==0.14.1
+torchvision==0.12.1
 
 # Numeric stack pinned together (not just numpy) — these are the exact
 # versions this project is developed/tested against. scipy/scikit-learn/
