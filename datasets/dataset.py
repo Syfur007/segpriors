@@ -157,26 +157,54 @@ class MedicalSegmentationDataset(Dataset):
     # In-RAM caching
     # ------------------------------------------------------------------
 
-    def _prefetch(self, limit_gb: float):
-        """Load all raw images/masks into self._cache if within size limit."""
+    def _prefetch(self, limit_gb: float, probe_samples: int = 20):
+        """Load all raw images/masks into self._cache if within size limit.
+
+        Two independent guards, because either one alone has already failed
+        in practice on this project's own datasets (see
+        configs/dataset/isic18.yaml's history): ISIC18's raw images vary
+        wildly in resolution, so a single pairs[0] probe can badly
+        undercount the true average.
+
+        1. The upfront estimate now samples up to *probe_samples* pairs
+           spread across the whole dataset (not just index 0) and uses the
+           *largest* observed per-pair size, not the first.
+        2. Even that can still be wrong (an outlier the sample missed, or —
+           as happened on a Kaggle worker — the configured root turning out
+           to hold un-resized originals instead of the expected pre-resized
+           copy). So the actual load below tracks a running byte total and
+           aborts caching the moment it would cross *limit_gb*, falling
+           back to disk reads for the rest, instead of continuing until the
+           host OOMs.
+        """
         if not self.pairs:
             return
 
-        probe_img  = cv2.imread(self.pairs[0][0])
-        probe_mask = cv2.imread(self.pairs[0][1], cv2.IMREAD_GRAYSCALE)
-        if probe_img is None:
-            logger.warning("Cache: could not read probe image; caching disabled.")
+        limit_bytes = limit_gb * (1024 ** 3)
+
+        step = max(1, len(self.pairs) // probe_samples)
+        sample_indices = range(0, len(self.pairs), step)
+        max_bytes_per_pair = 0
+        for idx in sample_indices:
+            img_path, mask_path = self.pairs[idx]
+            img = cv2.imread(img_path)
+            mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                continue
+            pair_bytes = img.nbytes + (mask.nbytes if mask is not None else 0)
+            max_bytes_per_pair = max(max_bytes_per_pair, pair_bytes)
+
+        if max_bytes_per_pair == 0:
+            logger.warning("Cache: could not read any probe image; caching disabled.")
             self._cache = None
             return
 
-        bytes_per_pair = probe_img.nbytes + (
-            probe_mask.nbytes if probe_mask is not None else 0
-        )
-        estimated_gb = bytes_per_pair * len(self.pairs) / (1024 ** 3)
+        estimated_gb = max_bytes_per_pair * len(self.pairs) / (1024 ** 3)
 
         if estimated_gb > limit_gb:
             logger.warning(
                 f"Cache: estimated footprint {estimated_gb:.2f} GB "
+                f"(worst-case pair across a {len(list(sample_indices))}-sample probe) "
                 f"exceeds limit {limit_gb:.2f} GB; caching disabled."
             )
             self._cache = None
@@ -184,9 +212,10 @@ class MedicalSegmentationDataset(Dataset):
 
         logger.info(
             f"Caching {len(self.pairs)} pairs into RAM "
-            f"(~{estimated_gb:.2f} GB)..."
+            f"(~{estimated_gb:.2f} GB estimated)..."
         )
         broken = []
+        running_bytes = 0
         for idx, (img_path, mask_path) in enumerate(self.pairs):
             img  = cv2.imread(img_path)
             mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
@@ -199,6 +228,19 @@ class MedicalSegmentationDataset(Dataset):
                 # far from the actual cause).
                 broken.append(img_path if img is None else mask_path)
                 continue
+
+            running_bytes += img.nbytes + mask.nbytes
+            if running_bytes > limit_bytes:
+                logger.warning(
+                    f"Cache: actual footprint exceeded the {limit_gb:.2f} GB "
+                    f"limit after {idx}/{len(self.pairs)} pairs — the probe "
+                    "estimate undercounted this dataset. Aborting caching; "
+                    "falling back to disk reads for every pair instead of "
+                    "risking an out-of-memory kill."
+                )
+                self._cache = None
+                return
+
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             self._cache[idx] = (img, mask)
         if broken:

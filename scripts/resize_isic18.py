@@ -69,7 +69,39 @@ def main():
                 print(f"  {i+1}/{len(files)}")
         print(f"{d}: done")
 
+    _verify_resized(args.dst)
     print("ALL_RESIZE_DONE")
+
+
+def _verify_resized(dst_root: str) -> None:
+    """Fail loudly, here, if the output isn't actually 256x256.
+
+    Catching this in the setup cell (seconds) instead of letting a
+    silently-still-full-resolution `data/isic18_256` reach training is the
+    whole point — the caching code downstream has its own safety net now
+    too (datasets/dataset.py's _prefetch), but that only prevents an OOM;
+    it doesn't prevent burning a chunk of a Kaggle session finding out.
+    """
+    for d in DIRS:
+        d_path = os.path.join(dst_root, d)
+        if not os.path.isdir(d_path):
+            continue
+        files = [f for f in sorted(os.listdir(d_path)) if f.lower().endswith((".jpg", ".png"))]
+        if not files:
+            continue
+        sample_path = os.path.join(d_path, files[0])
+        img = cv2.imread(sample_path, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            raise RuntimeError(f"Post-resize check: could not read {sample_path!r}.")
+        h, w = img.shape[:2]
+        if (h, w) != (SIZE, SIZE):
+            raise RuntimeError(
+                f"Post-resize check failed: {sample_path!r} is {w}x{h}, expected "
+                f"{SIZE}x{SIZE}. The resize did not take effect — do not proceed "
+                "to training against this --dst; caching it as-is is what OOM-killed "
+                "a Kaggle session before this check existed."
+            )
+        print(f"Post-resize check OK: {sample_path} is {w}x{h}.")
 
 
 if __name__ == "__main__":
