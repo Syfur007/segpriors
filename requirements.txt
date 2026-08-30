@@ -49,6 +49,8 @@ h5py
 huggingface-hub==0.11.0
 ml_collections
 tensorboardx
+tensorboard  # utils/plot_training.py reads events back via tensorboard's EventAccumulator —
+             # a different package from tensorboardx above, which only writes them.
 medpy
 
 # --- Framework-spec additions (Technical_Framework_Spec.md compliance) ---
