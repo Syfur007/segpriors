@@ -75,7 +75,7 @@ def analytic_flops(model: nn.Module, input_shape: Tuple[int, int, int]) -> Dict[
     model.eval()
     try:
         with torch.no_grad():
-            dummy = torch.zeros(1, *input_shape)
+            dummy = torch.zeros(1, *input_shape, device=next(model.parameters()).device)
             model(dummy)
     finally:
         for h in handles:
@@ -120,7 +120,7 @@ def fvcore_flops(model: nn.Module, input_shape: Tuple[int, int, int]) -> Dict[st
     model.eval()
     try:
         with torch.no_grad():
-            dummy = torch.zeros(1, *input_shape)
+            dummy = torch.zeros(1, *input_shape, device=next(model.parameters()).device)
             analysis = FlopCountAnalysis(model, dummy)
             analysis.unsupported_ops_warnings(False)
             analysis.uncalled_modules_warnings(False)

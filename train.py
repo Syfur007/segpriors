@@ -39,7 +39,12 @@ from training.callbacks import (
 )
 from orchestration.runid import config_hash, run_id as compute_run_id
 from profiling.flops import FlopsAgreementError, check_flops_agreement
-from training.determinism import reset_recorded_nondeterminism, seed_everything
+from training.determinism import (
+    record_manifest_extra,
+    reset_recorded_nondeterminism,
+    seed_everything,
+)
+from datasets.channels import modality_effective_channels, randproj_rgb_matrix
 from losses import get_loss
 from training.optimizers import build_optimizer, build_scheduler
 from utils.metrics import count_parameters
@@ -128,6 +133,34 @@ def run_training(config: dict, fold=None, run_id: Optional[str] = None) -> float
         )
     except FlopsAgreementError as exc:
         logger.warning(f"FLOPs agreement check failed: {exc}")
+
+    # ── Provenance: which channel groups and (for m7) which projection
+    # matrix this run actually used — ICCIT2026_MASTER_PLAN.md §8 requires
+    # both in the manifest so a reported result can be traced back to
+    # exactly what ran. Computed the same way datasets/augment.py resolves
+    # them for the real per-image pipeline (modality_effective_channels
+    # with the config's own channel_mode/modality; randproj_rgb_matrix
+    # with its default seed=0, matching augment.py's unkeyworded call).
+    channel_mode = dataset_cfg.get("channel_mode")
+    if channel_mode is not None:
+        channel_order = modality_effective_channels(channel_mode, dataset_cfg.get("modality", "colour"))
+        record_manifest_extra("channel_order", channel_order)
+        if "randproj_rgb" in channel_order:
+            record_manifest_extra(
+                "projection_matrix_hash",
+                randproj_rgb_matrix(dataset_cfg["name"], seed=0)["hash"],
+            )
+    # Achieved capacity for this run's actual model — the fact Block B's
+    # width-matched configs need recorded (target_params/relative_error
+    # live only in scripts/gen_iccit_configs.py's generation-time comment,
+    # not a config field; recording what was actually built here is what
+    # lets a later comparison against the mode being matched compute the
+    # relative error post hoc). Recorded for every run, not just Block B,
+    # since it costs nothing and is never wrong to have.
+    record_manifest_extra(
+        "width_match_achieved",
+        {"in_channels": model_cfg["in_channels"], "channels": model_cfg.get("channels"), "params": params},
+    )
 
     # ── Loss ───────────────────────────────────────────────────────────
     loss_kwargs = dict(training_cfg.get("loss_kwargs", {}) or {})

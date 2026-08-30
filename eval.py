@@ -7,6 +7,7 @@ import numpy as np
 from tqdm import tqdm
 
 from metrics import compute_dataset_metrics
+from metrics.aggregate import write_per_image_parquet
 from models import get_model
 from datasets import StandardSplitDataModule
 from datasets.splits import TestLoaderGuardError
@@ -310,6 +311,16 @@ def main():
 
     eval_duration = time.time() - start_eval_time
     logger.info(f"Evaluation finished in {eval_duration:.2f} seconds.")
+
+    # ICCIT2026_MASTER_PLAN.md §7: per-image scores are the only legitimate
+    # aggregate source — nothing downstream (stats/, reporting/) may
+    # recompute from a summary. Written next to this run's other eval
+    # outputs (report.json/report.md/curves/); no existing code reads this
+    # file back yet; stats.run_family_comparison currently takes per-image
+    # arrays as direct arguments rather than loading them from here.
+    parquet_path = os.path.join(exp_log_dir, "per_image.parquet")
+    write_per_image_parquet(preds_list, gts_list, parquet_path)
+    logger.info(f"Wrote per-image scores → {parquet_path}")
 
     # Log macro metrics
     logger.info(
