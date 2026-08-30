@@ -127,6 +127,16 @@ class DatasetConfig(_Strict):
     # every other handler.
     dedup: bool = True
 
+    # BUSI-specific (datasets/busi.py): run
+    # preprocess.detect_colour_contamination() before splitting, excluding
+    # images with real (non-artifact) colour content despite this
+    # dataset's modality="grayscale" declaration (colour Doppler overlays,
+    # coloured calipers/text) — see that function's docstring for why this
+    # threatens C2 specifically, not just generic data hygiene. Mandatory
+    # per the same reasoning as dedup above. Ignored by every other
+    # handler.
+    check_grayscale: bool = True
+
     # Phase 4 (datasets/channels.py, datasets/augment.py). modality is
     # fixed at dataset level (a dataset simply is colour or grayscale) —
     # not overridable per-experiment the way channel_mode/channel_order

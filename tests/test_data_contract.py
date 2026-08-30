@@ -376,7 +376,17 @@ def test_busi_handler_interface(tmp_path):
             _write_pair(root / cls / f"{cls} ({i}).png", root / cls / f"{cls} ({i})_mask.png", rng)
 
     handler = BUSI(
-        {"root": str(root), "split": {"train": 0.6, "val": 0.2, "test": 0.2}, "dedup": False},
+        {
+            "root": str(root),
+            "split": {"train": 0.6, "val": 0.2, "test": 0.2},
+            "dedup": False,
+            # This interface test's synthetic images are pure random RGB
+            # noise (not a repeated-gray triple), which detect_colour_
+            # contamination() would correctly flag as colour-contaminated —
+            # irrelevant to what this test checks, so disabled here the
+            # same way "dedup" is.
+            "check_grayscale": False,
+        },
         seed=0,
     )
     train_ds = handler.get_dataset("train")
@@ -407,12 +417,58 @@ def test_busi_dedup_is_mandatory_and_excludes_duplicates(tmp_path):
     cv2.imwrite(str(root / "benign" / "benign (1)_mask.png"), mask)
 
     handler = BUSI(
-        {"root": str(root), "split": {"train": 0.5, "val": 0.0, "test": 0.5}, "dedup": True},
+        {
+            "root": str(root),
+            "split": {"train": 0.5, "val": 0.0, "test": 0.5},
+            "dedup": True,
+            "check_grayscale": False,  # isolate dedup; see test above
+        },
         seed=0,
     )
     handler._build_splits(0)
     total = sum(len(v) for v in handler._splits.values())
     assert total == 1  # one of the identical pair excluded
+
+
+def test_busi_check_grayscale_flags_colour_contamination(tmp_path):
+    import cv2
+    import numpy as np
+
+    from datasets.busi import BUSI
+
+    root = tmp_path / "busi"
+    (root / "benign").mkdir(parents=True)
+    rng = np.random.default_rng(2)
+
+    # A genuinely grayscale-sourced image: one intensity channel repeated
+    # into 3 identical RGB channels — zero saturation everywhere.
+    gray = rng.integers(0, 256, size=(64, 64), dtype=np.uint8)
+    clean_img = np.stack([gray, gray, gray], axis=-1)
+    mask = (rng.random((64, 64)) > 0.6).astype(np.uint8) * 255
+    cv2.imwrite(str(root / "benign" / "benign (0).png"), clean_img)
+    cv2.imwrite(str(root / "benign" / "benign (0)_mask.png"), mask)
+
+    # A contaminated image: mostly the same grayscale content, but with a
+    # patch of real colour baked in (simulating a colour Doppler overlay /
+    # coloured caliper).
+    contaminated_img = clean_img.copy()
+    contaminated_img[10:30, 10:30] = [0, 0, 255]  # saturated red patch (BGR)
+    cv2.imwrite(str(root / "benign" / "benign (1).png"), contaminated_img)
+    cv2.imwrite(str(root / "benign" / "benign (1)_mask.png"), mask)
+
+    handler = BUSI(
+        {
+            "root": str(root),
+            "split": {"train": 0.5, "val": 0.0, "test": 0.5},
+            "dedup": False,
+            "check_grayscale": True,
+        },
+        seed=0,
+    )
+    handler._build_splits(0)
+    all_pairs = [p for split_pairs in handler._splits.values() for p in split_pairs]
+    assert len(all_pairs) == 1  # the colour-contaminated image excluded, clean one kept
+    assert "benign (0)" in all_pairs[0][0]
 
 
 def test_isic18_handler_interface(tmp_path):

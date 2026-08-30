@@ -22,6 +22,13 @@ Deduplication (``preprocess.dedup()``) is **mandatory, not optional**: BUSI
 is known to contain near-duplicate images across (and within) its
 benign/malignant/normal folders, which a naive split could scatter across
 train and test — see IMPLEMENTATION_PLAN.md's Phase 3 section.
+
+Colour-contamination filtering (``preprocess.detect_colour_contamination()``)
+is **also mandatory by default**: real BUSI archives include frames with
+baked-in colour Doppler overlays or coloured calipers/text despite the
+dataset's modality being declared "grayscale" — see that function's
+docstring for why this specifically threatens this study's colour-channel
+claims (C2), not just generic data hygiene.
 """
 import math
 import os
@@ -43,6 +50,10 @@ class BUSI:
         dedup : bool — run preprocess.dedup() before splitting (default: True; set False
                 only to skip the (slow, one-time) dedup pass on a run you know is already
                 deduplicated — never to skip it outright on first use)
+        check_grayscale : bool — run preprocess.detect_colour_contamination() before
+                splitting (default: True), excluding images with real (non-artifact)
+                colour content despite this dataset's modality="grayscale" declaration.
+                Set False only to skip the check on a run you know is already filtered.
     """
 
     NAME = "busi"
@@ -58,6 +69,7 @@ class BUSI:
         self._root = root
         self._seed = seed
         self._dedup = cfg.get("dedup", True)
+        self._check_grayscale = cfg.get("check_grayscale", True)
         self._split_ratios = cfg.get("split")
         if not self._split_ratios:
             raise ValueError(
@@ -106,6 +118,21 @@ class BUSI:
                 logger.warning(
                     f"BUSI: preprocess.dedup() flagged {len(excluded)}/{len(pairs)} "
                     "near-duplicate images for exclusion (mandatory per spec)."
+                )
+            pairs = [p for i, p in enumerate(pairs) if i not in set(excluded)]
+
+        if self._check_grayscale:
+            from .preprocess import detect_colour_contamination
+            excluded = detect_colour_contamination(pairs)
+            if excluded:
+                logger.warning(
+                    f"BUSI: preprocess.detect_colour_contamination() flagged "
+                    f"{len(excluded)}/{len(pairs)} images with real (non-artifact) "
+                    "colour content despite this dataset's modality=\"grayscale\" "
+                    "declaration — excluding them, since they'd otherwise carry "
+                    "genuine signal through the ycbcr/randproj_rgb channels that "
+                    "modality_effective_channels() assumes are dead weight here "
+                    "(ICCIT2026_MASTER_PLAN.md C2)."
                 )
             pairs = [p for i, p in enumerate(pairs) if i not in set(excluded)]
 

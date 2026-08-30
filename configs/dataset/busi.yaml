@@ -26,6 +26,16 @@
 # scripts/gen_iccit_configs.py the wrong width, and would fail the plan's
 # mandatory pre-flight check ("m3 and m7 report equal effective channels
 # on BUSI") outright.
+#
+# check_grayscale: true — modality="grayscale" above is a declaration, not
+# a guarantee: real BUSI archives include frames with baked-in colour
+# Doppler overlays or coloured calipers/text, which are NOT the degenerate
+# repeated-gray case modality_effective_channels() assumes. Those images
+# would leak real (but purely artifactual) signal through the ycbcr/
+# randproj_rgb channels — and since annotations are usually placed on or
+# near the lesion, that's a concrete shortcut path for m3/m7 to show a
+# spurious effect. preprocess.detect_colour_contamination() flags and
+# excludes them; mandatory per the same reasoning as dedup above.
 dataset:
   name: "BUSI"
   root: "data/busi/Dataset_BUSI_with_GT"
@@ -35,3 +45,4 @@ dataset:
     val: 0.15
     test: 0.15
   dedup: true
+  check_grayscale: true

@@ -156,3 +156,52 @@ def dedup(
                 excluded.add(j)
 
     return sorted(excluded)
+
+
+# ---------------------------------------------------------------------------
+# Colour-contamination detection — for modality="grayscale" datasets (BUSI)
+# ---------------------------------------------------------------------------
+
+def detect_colour_contamination(
+    pairs: Sequence[Tuple[str, str]],
+    pixel_saturation_threshold: int = 20,
+    area_fraction_threshold: float = 0.005,
+) -> List[int]:
+    """Return indices into *pairs* whose image is not actually near-grayscale.
+
+    ``datasets.channels.modality_effective_channels()`` treats a
+    modality="grayscale" dataset's "ycbcr"/"randproj_rgb" channel groups as
+    carrying zero extra information, on the premise that the source image
+    is a single intensity value repeated into 3 identical RGB channels. For
+    BUSI specifically, that premise is not universally true: real clinical
+    ultrasound archives commonly bake actual colour into the saved frame —
+    colour Doppler flow overlays, coloured measurement calipers/text — so a
+    meaningful fraction of "grayscale" BUSI images carry genuine, non-
+    constant RGB divergence that has nothing to do with tissue. Those
+    channels would then encode a real signal from an annotation artifact
+    instead of dead weight — and since sonographers place calipers/Doppler
+    markers on or near the lesion, a colour-derived channel mode (m3/m7)
+    could show a spurious "colour helps" effect that's actually this
+    artifact leaking into the model, not information about the anatomy.
+
+    Flags an image when the fraction of pixels whose HSV saturation exceeds
+    *pixel_saturation_threshold* (0-255 scale) itself exceeds
+    *area_fraction_threshold* of the image — two-level so a handful of
+    stray anti-aliasing/compression pixels near a hard edge (present even
+    in a genuinely grayscale-sourced RGB triple saved as JPEG) don't trip
+    this; a real colour overlay covers a visible, contiguous patch.
+
+    Same contract as ``dedup()``: returns indices to exclude, doesn't touch
+    *pairs* itself.
+    """
+    excluded: List[int] = []
+    for idx, (img_path, _) in enumerate(pairs):
+        img = cv2.imread(img_path)
+        if img is None:
+            raise FileNotFoundError(f"Image not found during colour-contamination check: {img_path}")
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        saturation = hsv[..., 1]
+        contaminated_fraction = float((saturation > pixel_saturation_threshold).mean())
+        if contaminated_fraction > area_fraction_threshold:
+            excluded.append(idx)
+    return excluded
