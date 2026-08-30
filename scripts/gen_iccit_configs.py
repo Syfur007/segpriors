@@ -64,8 +64,14 @@ MKUNET_INPUT_SHAPE_HW = (256, 256)
 UNET_FEATURES = [64, 128, 256, 512]  # configs/base.yaml's default
 
 TOL = 0.1
-MODALITY = "colour"  # every configs/dataset/*.yaml fragment used here leaves
-                      # dataset.modality at its schema default ("colour")
+# Per-dataset modality — must match each configs/dataset/<ds>.yaml fragment's
+# own `dataset.modality` exactly, since it drives which channel groups
+# effective_channel_count() (and therefore this generator's model.in_channels/
+# width-matching) resolves to. BUSI is ultrasound (grayscale); ClinicDB/
+# ISIC18 are colour endoscopy/dermoscopy. Getting this wrong for BUSI is
+# exactly how the m3/m7 "equal effective channels" pre-flight check silently
+# fails — see configs/dataset/busi.yaml's modality comment.
+DATASET_MODALITY = {"clinicdb": "colour", "isic18": "colour", "busi": "grayscale"}
 
 
 def _mkunet_model_fn(channels):
@@ -119,8 +125,8 @@ def _write(name: str, doc: dict, note_lines, dry_run: bool):
 
 def _mkunet_channel_mode_configs(dry_run: bool):
     for mode in CHANNEL_MODES:
-        in_ch = effective_channel_count(mode, MODALITY)
         for ds in DATASETS:
+            in_ch = effective_channel_count(mode, DATASET_MODALITY[ds])
             doc = {
                 "compose": ["../../base.yaml", f"../../dataset/{ds}.yaml", f"../../model/mkunet/{MKUNET_SIZE}.yaml"],
                 "model": {"in_channels": in_ch},
@@ -134,17 +140,24 @@ def _mkunet_channel_mode_configs(dry_run: bool):
 
 def _mkunet_matched_configs(dry_run: bool):
     for mode in MATCHED_MODES:
-        in_ch = effective_channel_count(mode, MODALITY)
-        target_params = _mkunet_params(in_ch)
-        match = _match_rgb_width(_mkunet_model_fn, [MKUNET_CHANNELS], target_params)
-        if not match["within_tolerance"]:
-            raise RuntimeError(
-                f"gen_iccit_configs: no RGB width candidate matched {mode}'s "
-                f"{target_params:,}-param target within {TOL:.0%} tolerance "
-                f"(best: {match['relative_error']:.1%} error). Add a wider "
-                f"MKUNET width candidate before generating this config."
-            )
         for ds in DATASETS:
+            # in_ch (and therefore the capacity target) is computed per
+            # dataset, not once for the mode: m5/m7 resolve to fewer
+            # effective channels on a grayscale dataset (BUSI) than on a
+            # colour one, so the RGB control they're matched against needs
+            # its own width search per dataset for those modes. m2/m4 are
+            # modality-invariant, so this just redoes identical work for
+            # them — cheap, and it keeps one code path instead of two.
+            in_ch = effective_channel_count(mode, DATASET_MODALITY[ds])
+            target_params = _mkunet_params(in_ch)
+            match = _match_rgb_width(_mkunet_model_fn, [MKUNET_CHANNELS], target_params)
+            if not match["within_tolerance"]:
+                raise RuntimeError(
+                    f"gen_iccit_configs: no RGB width candidate matched {mode}'s "
+                    f"{target_params:,}-param target ({ds}, in_ch={in_ch}) within "
+                    f"{TOL:.0%} tolerance (best: {match['relative_error']:.1%} error). "
+                    "Add a wider MKUNET width candidate before generating this config."
+                )
             doc = {
                 "compose": ["../../base.yaml", f"../../dataset/{ds}.yaml", f"../../model/mkunet/{MKUNET_SIZE}.yaml"],
                 "model": {"in_channels": 3, "channels": match["channels"]},
@@ -163,8 +176,8 @@ def _mkunet_matched_configs(dry_run: bool):
 
 def _mkunet_order_ablation_configs(dry_run: bool):
     for mode in ORDER_ABLATION_MODES:
-        in_ch = effective_channel_count(mode, MODALITY)
         for ds in DATASETS:
+            in_ch = effective_channel_count(mode, DATASET_MODALITY[ds])
             doc = {
                 "compose": ["../../base.yaml", f"../../dataset/{ds}.yaml", f"../../model/mkunet/{MKUNET_SIZE}.yaml"],
                 "model": {"in_channels": in_ch},
@@ -178,7 +191,11 @@ def _mkunet_order_ablation_configs(dry_run: bool):
 
 
 def _unet_generality_configs(dry_run: bool):
-    m4_in_ch = effective_channel_count("m4", MODALITY)
+    # m4 = rgb+xy+rtheta never includes ycbcr/randproj_rgb, so its effective
+    # channel count (and therefore this capacity target) is the same under
+    # every modality in DATASET_MODALITY — safe to compute once, unlike the
+    # per-dataset in_ch below.
+    m4_in_ch = effective_channel_count("m4", "colour")
     m4_target_params = _unet_params(m4_in_ch)
     m4_match = _match_rgb_width(_unet_model_fn, [UNET_FEATURES], m4_target_params)
     if not m4_match["within_tolerance"]:
@@ -188,8 +205,8 @@ def _unet_generality_configs(dry_run: bool):
         )
 
     for mode in ("m1", "m4", "m5"):
-        in_ch = effective_channel_count(mode, MODALITY)
         for ds in DATASETS:
+            in_ch = effective_channel_count(mode, DATASET_MODALITY[ds])
             doc = {
                 "compose": ["../../base.yaml", f"../../dataset/{ds}.yaml"],
                 "model": {"in_channels": in_ch},

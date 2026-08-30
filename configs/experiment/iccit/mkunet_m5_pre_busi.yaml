@@ -5,7 +5,7 @@ compose:
 - ../../dataset/busi.yaml
 - ../../model/mkunet/t.yaml
 model:
-  in_channels: 11
+  in_channels: 8
 dataset:
   channel_mode: m5
   channel_build_order: pre

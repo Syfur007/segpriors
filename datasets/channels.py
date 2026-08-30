@@ -310,17 +310,32 @@ def build_channels(
     return build_channels_from_groups(image, groups, dataset_name, randproj_seed)
 
 
+#: Groups computed as a linear/nonlinear transform of the RGB triple that
+#: carries no additional information once the source RGB is itself a
+#: repeated-gray frame (R=G=B everywhere): ycbcr's Cb/Cr become the literal
+#: constant (0.5, 0.5); randproj_rgb's outputs stay non-constant (they still
+#: vary with the one real intensity value) but are fully determined by that
+#: single value — a linear recombination of three identical numbers adds no
+#: information over "rgb" alone. Both must be dropped together for
+#: modality="grayscale", or m3 (rgb+ycbcr) and m7 (rgb+randproj_rgb) stop
+#: being equal-width on a grayscale dataset — the plan's own pre-flight gate
+#: ("m3 and m7 report equal effective channels on BUSI") exists precisely to
+#: catch that, since a width mismatch there invalidates C2.
+_RGB_DERIVED_GROUPS_DEGENERATE_UNDER_GRAYSCALE = frozenset({"ycbcr", "randproj_rgb"})
+
+
 def modality_effective_channels(mode: str, modality: str) -> List[str]:
     """The channel groups *mode* actually resolves to once *modality* is
     taken into account.
 
-    For modality="grayscale", drops "ycbcr" — Cb/Cr computed from a
-    repeated-gray "RGB" frame are constant (0.5, 0.5) everywhere, pure
-    dead weight the model would otherwise have to learn is uninformative.
-    This is the fix for models/baseline/emcad.py's old inline
-    "if grayscale, repeat to 3ch" gap: the *data* a grayscale-modality
-    dataset produces never contains those degenerate channels in the first
-    place, so no model needs its own ad hoc patch for it.
+    For modality="grayscale", drops every group in
+    _RGB_DERIVED_GROUPS_DEGENERATE_UNDER_GRAYSCALE — pure dead weight (or,
+    for randproj_rgb, weight fully redundant with "rgb") the model would
+    otherwise have to learn is uninformative. This is the fix for
+    models/baseline/emcad.py's old inline "if grayscale, repeat to 3ch"
+    gap: the *data* a grayscale-modality dataset produces never contains
+    those degenerate channels in the first place, so no model needs its
+    own ad hoc patch for it.
 
     modality="colour" is a no-op (every requested group is meaningful).
     """
@@ -330,7 +345,7 @@ def modality_effective_channels(mode: str, modality: str) -> List[str]:
     if groups is None:
         raise ValueError(f"Unknown channel mode '{mode}'. Known: {sorted(MODE_GROUPS)}")
     if modality == "grayscale":
-        return [g for g in groups if g != "ycbcr"]
+        return [g for g in groups if g not in _RGB_DERIVED_GROUPS_DEGENERATE_UNDER_GRAYSCALE]
     return list(groups)
 
 

@@ -16,6 +16,7 @@ from datasets.channels import (
     MODE_GROUPS,
     build_channels,
     coordonly_channels,
+    effective_channel_count,
     modality_effective_channels,
     randproj_rgb_matrix,
     r_theta_channels,
@@ -192,15 +193,32 @@ def test_ycbcr_matches_bt601_reference():
 # ---------------------------------------------------------------------------
 
 def test_grayscale_drops_colour():
+    # Both groups computed as a transform of the RGB triple degenerate for a
+    # repeated-gray source: ycbcr's Cb/Cr become the literal constant (0.5,
+    # 0.5); randproj_rgb's outputs stay non-constant but are fully
+    # determined by the one real intensity value, so they add nothing over
+    # plain "rgb" either. Dropping only ycbcr (the old behaviour) left m7
+    # (rgb+randproj_rgb) six-wide while m3 (rgb+ycbcr) fell to three-wide on
+    # a grayscale dataset — see test_m3_m7_equal_width_on_grayscale below,
+    # which is the plan's own pre-flight gate encoded as a regression test.
+    degenerate = {"ycbcr", "randproj_rgb"}
     for mode in MODE_GROUPS:
         groups = modality_effective_channels(mode, "grayscale")
-        assert "ycbcr" not in groups
-        # Every non-ycbcr group in the mode is still present.
-        assert groups == [g for g in MODE_GROUPS[mode] if g != "ycbcr"]
+        assert not degenerate & set(groups)
+        assert groups == [g for g in MODE_GROUPS[mode] if g not in degenerate]
 
     # colour is a no-op.
     for mode in MODE_GROUPS:
         assert modality_effective_channels(mode, "colour") == MODE_GROUPS[mode]
+
+
+def test_m3_m7_equal_width_on_grayscale():
+    """ICCIT2026_MASTER_PLAN.md §6 pre-flight: 'm3 and m7 report equal
+    effective channels on BUSI' — a mismatch invalidates C2. m3 and m7 are
+    each other's width-matched control by construction (§4); this must hold
+    for every modality, not just colour."""
+    for modality in ("colour", "grayscale"):
+        assert effective_channel_count("m3", modality) == effective_channel_count("m7", modality)
 
 
 def test_grayscale_drops_colour_via_augmentation_policy():
