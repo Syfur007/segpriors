@@ -222,3 +222,25 @@ def test_determinism(tmp_path, tiny_config_factory):
     assert sd_a.keys() == sd_b.keys()
     for key in sd_a:
         assert torch.equal(sd_a[key], sd_b[key]), f"weights diverged at {key}"
+
+
+def test_capture_showwarning_dedupes_repeated_op(tiny_config_factory):
+    """torch's TORCH_WARN (unlike TORCH_WARN_ONCE) fires on every call to a
+    non-deterministic op, not once per process — a real run can call the
+    same op every batch and emit the identical warning text thousands of
+    times. _capture_showwarning must dedupe on capture, or a manifest's
+    nondeterministic_ops balloons and floods the dashboard's Runs screen
+    with one red line per occurrence (see the dashboard's runs.js).
+    """
+    from training.determinism import _capture_showwarning, reset_recorded_nondeterminism
+
+    reset_recorded_nondeterminism()
+    msg = "some_op does not have a deterministic implementation, but you set 'torch.use_deterministic_algorithms(True, warn_only=True)'."
+    for _ in range(50):
+        _capture_showwarning(msg, UserWarning, "somefile.py", 1)
+    _capture_showwarning("a different nondeterministic op message", UserWarning, "somefile.py", 1)
+
+    assert get_recorded_nondeterminism() == [
+        msg,
+        "a different nondeterministic op message",
+    ]

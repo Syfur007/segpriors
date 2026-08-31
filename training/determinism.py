@@ -36,7 +36,14 @@ _NONDETERMINISM_MARKERS = (
 def _capture_showwarning(message, category, filename, lineno, file=None, line=None):
     text = str(message)
     if any(marker in text.lower() for marker in _NONDETERMINISM_MARKERS):
-        _NONDETERMINISM_LOG.append(text)
+        # torch's TORCH_WARN (unlike TORCH_WARN_ONCE) fires on every call to
+        # the non-deterministic op, not once per process — an op used every
+        # training step (e.g. upsample_bilinear2d_backward) would otherwise
+        # append an identical string once per batch, ballooning the manifest
+        # with thousands of duplicate lines. Only the distinct op warnings
+        # matter for "was this run reproducible", so dedupe on capture.
+        if text not in _NONDETERMINISM_LOG:
+            _NONDETERMINISM_LOG.append(text)
     _original_showwarning(message, category, filename, lineno, file, line)
 
 

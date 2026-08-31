@@ -8,6 +8,7 @@
 /runs
 /pretrained_pth
 /artifacts
+/results
 __pycache__/
 *.pyc
 /dashboard
@@ -15,3 +16,4 @@ __pycache__/
 exp_dashboard.zip
 .gitignore
 image.py
+kaggle.json
